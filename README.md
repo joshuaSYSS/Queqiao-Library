@@ -4,7 +4,7 @@
 Queqiao Matchmaking Library is a library built for C#, using Sockets and TcpClient/TcpListener as its framework.
 
 ## How to use it?
-Download the script `Server.dll` on your intended server, and `Client.dll` on the intended client.
+Download the script `Server.dll` and `Client.dll`.
 
 ### Visual Studio
 Check [this](https://learn.microsoft.com/en-us/dotnet/core/tutorials/library-with-visual-studio#add-a-project-reference) official tutorial.
