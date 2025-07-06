@@ -1,3 +1,6 @@
 # Queqiao Matchmaking Library
 
-Queqiao Matchmaking Library is a libary built for C#, using TCP/IP as its networking framework.
+## What is it?
+Queqiao Matchmaking Library is a library built for C#, using Sockets and TcpClient/TcpListener as its framework.
+
+#
