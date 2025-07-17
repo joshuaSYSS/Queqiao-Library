@@ -11,160 +11,138 @@ namespace Queqiao
 {
     public class MatchmakingServer
     {
-        private TcpListener listener;
-        private readonly object queueLock = new object();
-        private List<TcpClient> matchmakingQueue = new List<TcpClient>();
-        private int groupSize = 2;
-        private bool isRunning = false;
-        private Thread acceptThread;
-        private Thread groupCheckThread;
+        private TcpListener _listener;
+        private readonly List<TcpClient> _waitingClients = new List<TcpClient>();
+        private readonly object _lock = new object();
+        private bool _isRunning;
+        private int _groupSize = 2;
+        private Thread _matchmakingThread;
 
         public int GroupSize
         {
-            get => groupSize;
-            set => groupSize = Math.Max(2, value);
-        }
-
-        public event Action<string> LogMessage;
-        public event Action<List<string>> GroupFormed;
-
-        public MatchmakingServer(int port)
-        {
-            listener = new TcpListener(IPAddress.Any, port);
-        }
-
-        public void Start()
-        {
-            if (isRunning) return;
-            isRunning = true;
-
-            listener.Start();
-            LogMessage?.Invoke($"Server started on port {((IPEndPoint)listener.LocalEndpoint).Port}...");
-
-            acceptThread = new Thread(AcceptClients);
-            acceptThread.Start();
-
-            groupCheckThread = new Thread(CheckGroups);
-            groupCheckThread.Start();
-        }
-
-        public void Stop()
-        {
-            isRunning = false;
-            listener.Stop();
-
-            // Close all queued clients
-            lock (queueLock)
+            get => _groupSize;
+            set
             {
-                foreach (var client in matchmakingQueue)
-                {
-                    try { client.Close(); } catch { }
-                }
-                matchmakingQueue.Clear();
+                if (value < 2) throw new ArgumentException("Group size must be at least 2");
+                _groupSize = value;
             }
-
-            acceptThread?.Join();
-            groupCheckThread?.Join();
         }
 
-        private void AcceptClients()
+        public void Start(int port)
         {
-            while (isRunning)
+            _listener = new TcpListener(IPAddress.Any, port);
+            _listener.Start();
+            _isRunning = true;
+
+            Console.WriteLine($"Server started on port {port}. Waiting for clients...");
+
+            // Start matchmaking thread
+            _matchmakingThread = new Thread(MatchmakingLoop);
+            _matchmakingThread.Start();
+
+            // Client acceptance loop
+            while (_isRunning)
             {
                 try
                 {
-                    TcpClient client = listener.AcceptTcpClient();
-                    LogMessage?.Invoke($"Client connected: {client.Client.RemoteEndPoint}");
+                    TcpClient client = _listener.AcceptTcpClient();
                     new Thread(() => HandleClient(client)).Start();
                 }
                 catch (SocketException)
                 {
-                    // Expected when stopping
+                    // Listener stopped
                 }
-                catch (Exception ex)
+            }
+        }
+
+        public void Stop()
+        {
+            _isRunning = false;
+            _listener.Stop();
+            lock (_lock)
+            {
+                foreach (var client in _waitingClients)
                 {
-                    if (isRunning) LogMessage?.Invoke($"Accept error: {ex.Message}");
+                    client.Close();
                 }
+                _waitingClients.Clear();
             }
         }
 
         private void HandleClient(TcpClient client)
         {
-            string clientId = client.Client.RemoteEndPoint.ToString();
-            NetworkStream stream = client.GetStream();
-            byte[] buffer = new byte[1024];
-
+            string clientIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
             try
             {
+                NetworkStream stream = client.GetStream();
+                byte[] buffer = new byte[1024];
                 int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                if (bytesRead == 0) return;
+                string command = System.Text.Encoding.ASCII.GetString(buffer, 0, bytesRead);
 
-                string message = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-
-                if (message == "JOIN")
+                if (command == "JOIN")
                 {
-                    lock (queueLock)
+                    lock (_lock)
                     {
-                        matchmakingQueue.Add(client);
+                        _waitingClients.Add(client);
                     }
-                    LogMessage?.Invoke($"Added to queue: {clientId}");
-                    SendResponse(stream, "ADDED_TO_QUEUE");
+                    Console.WriteLine($"Client {clientIp} joined queue");
+                    SendResponse(stream, "ADDED");
                 }
-                else if (message == "CANCEL")
+                else if (command == "LEAVE")
                 {
-                    lock (queueLock)
+                    lock (_lock)
                     {
-                        if (matchmakingQueue.Remove(client))
+                        if (_waitingClients.Remove(client))
                         {
-                            LogMessage?.Invoke($"Cancelled matchmaking: {clientId}");
-                            SendResponse(stream, "CANCELLED");
+                            Console.WriteLine($"Client {clientIp} left queue");
+                            SendResponse(stream, "REMOVED");
                         }
                     }
-                    client.Close();
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                LogMessage?.Invoke($"Client error ({clientId}): {ex.Message}");
-                lock (queueLock) matchmakingQueue.Remove(client);
+                // Handle client disconnect
+                lock (_lock) { _waitingClients.Remove(client); }
                 client.Close();
             }
         }
 
-        private void CheckGroups()
+        private void MatchmakingLoop()
         {
-            while (isRunning)
+            while (_isRunning)
             {
-                lock (queueLock)
+                lock (_lock)
                 {
-                    while (matchmakingQueue.Count >= groupSize)
+                    if (_waitingClients.Count >= _groupSize)
                     {
-                        List<TcpClient> group = new List<TcpClient>();
-                        List<string> groupEndpoints = new List<string>();
-
-                        for (int i = 0; i < groupSize; i++)
+                        // Create a new group
+                        var group = new List<TcpClient>();
+                        for (int i = 0; i < _groupSize; i++)
                         {
-                            TcpClient client = matchmakingQueue[0];
-                            group.Add(client);
-                            groupEndpoints.Add(client.Client.RemoteEndPoint.ToString());
-                            matchmakingQueue.RemoveAt(0);
+                            group.Add(_waitingClients[0]);
+                            _waitingClients.RemoveAt(0);
                         }
 
-                        // Notify about the group
-                        GroupFormed?.Invoke(groupEndpoints);
+                        // Notify group members
+                        List<string> ipAddresses = new List<string>();
+                        foreach (var client in group)
+                        {
+                            string ip = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
+                            ipAddresses.Add(ip);
+                        }
+                        string groupIps = string.Join(",", ipAddresses);
 
-                        // Notify each client in the group and close their connections
-                        foreach (TcpClient client in group)
+                        foreach (var client in group)
                         {
                             try
                             {
-                                string groupInfo = string.Join(",", groupEndpoints);
-                                SendResponse(client.GetStream(), $"MATCHED {groupInfo}");
-                                client.Close();
+                                SendResponse(client.GetStream(), $"MATCHED:{groupIps}");
+                                Console.WriteLine($"Matched client: {((IPEndPoint)client.Client.RemoteEndPoint).Address}");
                             }
-                            catch (Exception ex)
+                            finally
                             {
-                                LogMessage?.Invoke($"Error notifying client: {ex.Message}");
+                                client.Close();
                             }
                         }
                     }
@@ -175,15 +153,8 @@ namespace Queqiao
 
         private void SendResponse(NetworkStream stream, string message)
         {
-            try
-            {
-                byte[] data = Encoding.ASCII.GetBytes(message);
-                stream.Write(data, 0, data.Length);
-            }
-            catch (Exception ex)
-            {
-                LogMessage?.Invoke($"Send response error: {ex.Message}");
-            }
+            byte[] data = System.Text.Encoding.ASCII.GetBytes(message);
+            stream.Write(data, 0, data.Length);
         }
     }
 }
