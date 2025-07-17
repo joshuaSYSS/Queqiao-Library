@@ -9,106 +9,74 @@ namespace Queqiao
 {
     public class MatchmakingClient
     {
-        private TcpClient client;
-        private NetworkStream stream;
-        private Thread listenThread;
-        private bool isMatchmaking = false;
+        private TcpClient _client;
+        private NetworkStream _stream;
+        private bool _isMatched;
+        private readonly object _lock = new object();
 
-        public event Action<string> LogMessage;
-        public event Action<string[]> Matched; // Group endpoints
+        public event Action<string[]> OnMatched;
 
         public void Connect(string ip, int port)
         {
-            client = new TcpClient();
-            client.Connect(ip, port);
-            stream = client.GetStream();
-
-            listenThread = new Thread(ListenForResponses);
-            listenThread.Start();
-
-            LogMessage?.Invoke($"Connected to server at {ip}:{port}");
+            _client = new TcpClient();
+            _client.Connect(ip, port);
+            _stream = _client.GetStream();
         }
 
-        public void Disconnect()
+        public void JoinQueue()
         {
-            if (isMatchmaking)
-                CancelMatchmaking();
+            if (_isMatched) return;
 
-            client?.Close();
-            listenThread?.Join();
-            LogMessage?.Invoke("Disconnected");
-        }
+            SendCommand("JOIN");
+            Console.WriteLine("Joined matchmaking queue");
 
-        public void JoinMatchmaking()
-        {
-            if (isMatchmaking) return;
-            SendMessage("JOIN");
-            isMatchmaking = true;
-            LogMessage?.Invoke("Joined matchmaking queue");
+            // Start listening for server responses
+            new Thread(ListenForResponses).Start();
         }
 
         public void CancelMatchmaking()
         {
-            if (!isMatchmaking) return;
-            SendMessage("CANCEL");
-            isMatchmaking = false;
+            lock (_lock)
+            {
+                if (_isMatched || _client == null) return;
+
+                SendCommand("LEAVE");
+                _client.Close();
+                Console.WriteLine("Cancelled matchmaking");
+            }
         }
 
-        private void SendMessage(string message)
+        private void SendCommand(string command)
         {
-            try
-            {
-                byte[] data = Encoding.ASCII.GetBytes(message);
-                stream.Write(data, 0, data.Length);
-            }
-            catch (Exception ex)
-            {
-                LogMessage?.Invoke($"Send error: {ex.Message}");
-            }
+            byte[] data = System.Text.Encoding.ASCII.GetBytes(command);
+            _stream.Write(data, 0, data.Length);
         }
 
         private void ListenForResponses()
         {
-            byte[] buffer = new byte[1024];
             try
             {
+                byte[] buffer = new byte[1024];
                 while (true)
                 {
-                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                    if (bytesRead == 0) break;
+                    int bytesRead = _stream.Read(buffer, 0, buffer.Length);
+                    string response = System.Text.Encoding.ASCII.GetString(buffer, 0, bytesRead);
 
-                    string response = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                    HandleServerResponse(response);
+                    if (response.StartsWith("MATCHED:"))
+                    {
+                        lock (_lock)
+                        {
+                            _isMatched = true;
+                            string[] ips = response.Substring(8).Split(',');
+                            OnMatched?.Invoke(ips);
+                        }
+                        break;
+                    }
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                LogMessage?.Invoke($"Connection error: {ex.Message}");
-            }
-            finally
-            {
-                isMatchmaking = false;
-            }
-        }
-
-        private void HandleServerResponse(string response)
-        {
-            LogMessage?.Invoke($"Server: {response}");
-
-            if (response.StartsWith("MATCHED"))
-            {
-                isMatchmaking = false;
-                // Format: "MATCHED endpoint1,endpoint2,..."
-                string[] parts = response.Split(new char[] { ' ' }, 2);
-                if (parts.Length == 2)
-                {
-                    string[] endpoints = parts[1].Split(',');
-                    Matched?.Invoke(endpoints);
-                }
-            }
-            else if (response == "CANCELLED")
-            {
-                isMatchmaking = false;
+                // Connection closed
             }
         }
     }
